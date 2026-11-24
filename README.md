@@ -1,30 +1,30 @@
 # spotify-pipeline
 
-Pipeline pessoal que junta o histórico completo de execuções do Spotify (Extended Streaming History) com coleta incremental pela Web API, modela os dados em fato + dimensões no SQLite e termina num dashboard Power BI. Treina OAuth com refresh token, ingestão incremental com dedup, modelagem dimensional e rate limit estrutural (a API não tem mais endpoints em lote).
+Personal data pipeline that combines my full Spotify listening history (Extended Streaming History export) with incremental collection from the Web API, models the data as a fact table plus dimensions in SQLite, and ends in a Power BI dashboard. It exercises OAuth with refresh tokens, incremental ingestion with deduplication, dimensional modeling, and working around structural rate limits (the API no longer has batch endpoints).
 
 ## Setup
 
-- [x] **Pedir o Extended Streaming History.** Conta → Privacidade → download de dados, opção estendida (não a básica, que só cobre 1 ano). Chega por e-mail em alguns dias.
-- [x] **Criar o app no Spotify Developer Dashboard.** Redirect URI: `http://127.0.0.1:8888/callback` (`localhost` não é aceito). Nome do app não pode começar com "Spot".
-- [x] Copiar `.env.example` para `.env` e preencher Client ID e Client Secret.
-- [x] `python -m venv .venv` e `.venv\Scripts\pip install -r requirements.txt`.
-- [x] **Pegar o refresh token:** `.venv\Scripts\python src\get_refresh_token.py`. Abre o navegador, recebe o callback em `127.0.0.1:8888`, grava o token e a data de emissão no `.env` e valida com `GET /me`.
-- [x] `python src/db.py` para criar o banco e as tabelas (o `ingest_recent.py` também aplica o schema).
+1. **Request the Extended Streaming History.** Account → Privacy → download your data, extended option (not the basic one, which only covers the last year). It arrives by email within a few days.
+2. **Create an app in the Spotify Developer Dashboard.** Redirect URI: `http://127.0.0.1:8888/callback` (`localhost` is not accepted). The app name cannot start with "Spot".
+3. Copy `.env.example` to `.env` and fill in the Client ID and Client Secret.
+4. `python -m venv .venv` and `.venv\Scripts\pip install -r requirements.txt`.
+5. **Get the refresh token:** `.venv\Scripts\python src\get_refresh_token.py`. It opens the browser, receives the callback on `127.0.0.1:8888`, saves the token and its issue date to `.env`, and validates it with `GET /me`.
+6. `python src/db.py` to create the database and tables (`ingest_recent.py` also applies the schema).
 
-## Uso
+## Usage
 
 ```powershell
-.venv\Scripts\python src\ingest_recent.py   # últimas 50 execuções -> fact_plays + dimensões
+.venv\Scripts\python src\ingest_recent.py   # last 50 plays -> fact_plays + dimensions
 ```
 
-A API só guarda as últimas 50 execuções: rodar com frequência suficiente para não passar disso entre uma coleta e outra. O script avisa quando detecta um buraco.
+The API only keeps the last 50 plays, so the script must run often enough that no more than 50 tracks are played between runs. It logs a warning when it detects a gap.
 
-### Agendamento (Windows)
+### Scheduling (Windows)
 
-Uma tarefa do Agendador de Tarefas, `spotify-pipeline ingest_recent`, roda o script de hora em hora e no logon, com `pythonw.exe` (sem janela). Se o PC estava desligado no horário, ela roda assim que der. O log fica em `logs/ingest_recent.log`, com rotação de 1 MB.
+A Task Scheduler task, `spotify-pipeline ingest_recent`, runs the script every hour and at logon using `pythonw.exe` (no console window). If the PC was off at the scheduled time, it runs as soon as possible. Logs go to `logs/ingest_recent.log`, rotated at 1 MB.
 
 ```powershell
-$repo = "C:\caminho\para\spotify-pipeline"
+$repo = "C:\path\to\spotify-pipeline"
 $action = New-ScheduledTaskAction -Execute "$repo\.venv\Scripts\pythonw.exe" -Argument "src\ingest_recent.py" -WorkingDirectory $repo
 $hourly = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1)
 $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
@@ -32,49 +32,49 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatt
 Register-ScheduledTask -TaskName "spotify-pipeline ingest_recent" -Action $action -Trigger $hourly,$logon -Settings $settings
 ```
 
-Limitação: com o PC desligado, o que for ouvido em outro dispositivo só é capturado se ainda estiver entre as últimas 50 execuções quando a tarefa rodar.
+Limitation: while the PC is off, plays from other devices are only captured if they are still among the last 50 when the task runs.
 
-> **O refresh token vence 180 dias após a autorização** (o refresh não estende o prazo). Quando vencer, o `/api/token` responde `400 invalid_grant`: rodar `get_refresh_token.py` de novo.
+> **The refresh token expires 180 days after the original authorization** (refreshing does not extend it). Once expired, `/api/token` returns `400 invalid_grant`: run `get_refresh_token.py` again.
 
-### Limitações da API observadas (nov/2026)
+### Observed API limitations (Nov 2026)
 
-- `GET /artists/{id}` não devolve mais `genres` (veio nulo no teste; a doc marca o campo como deprecated). Análises por gênero dependem de outra fonte.
-- O refresh não devolveu `refresh_token` novo; o token original continua valendo.
-- O objeto `track` do `recently-played` já traz todas as colunas de `dim_track` e `dim_album`, então o enrich por ID é quase desnecessário para música vinda da API.
+- `GET /artists/{id}` no longer returns `genres` (null in testing; the docs mark the field as deprecated). Genre analysis needs another source.
+- The token refresh did not return a new `refresh_token`; the original one stays valid.
+- The `track` object in `recently-played` already contains every column of `dim_track` and `dim_album`, so per-ID enrichment is almost unnecessary for plays coming from the API.
 
-## Decisões de projeto
+## Design decisions
 
-**Autenticação**
+**Authentication**
 
-- **Onde guardar Client ID, secret e refresh token sem que entrem no Git**
-  - Escolha: `.env` na raiz, listado no `.gitignore` desde antes do primeiro commit; `.env.example` sem valores vai pro Git.
-  - Motivo: projeto local de um usuário só; um cofre de segredos seria complexidade sem ganho. Segredo commitado uma vez fica no histórico, por isso o `.gitignore` veio primeiro.
-- **Quando renovar o access token** (sempre no início, só ao tomar 401, ou outra regra)
-  - Escolha: na primeira chamada de cada execução e quando faltar menos de 5 min para expirar; se ainda assim vier 401, força um refresh e tenta uma vez.
-  - Motivo: cada coleta leva segundos, então renovar no início é barato e evita 401 previsível. A margem cobre o enrich longo; o retry no 401 cobre token revogado ou relógio errado.
-- **Onde gravar o refresh token renovado** (o refresh pode devolver um token novo ou nenhum)
-  - Escolha: no próprio `.env`, só quando a resposta trouxer um `refresh_token` diferente do atual. A data de emissão fica em `SPOTIFY_REFRESH_TOKEN_ISSUED_AT` e o script avisa quando faltarem 15 dias para os 180.
-  - Motivo: a doc diz que o token pode não vir na resposta e, nesse caso, o atual continua valendo; sobrescrever com vazio derrubaria o acesso. O token não informa a própria idade, então a data precisa ser guardada.
+- **Where to store the Client ID, secret, and refresh token without committing them**
+  - Choice: a `.env` file at the repo root, listed in `.gitignore` before the first commit; `.env.example` with empty values is committed.
+  - Why: a local, single-user project; a secrets vault would add complexity with no benefit. A secret committed once stays in the history, so `.gitignore` came first.
+- **When to renew the access token** (always at startup, only on 401, or another rule)
+  - Choice: on the first call of each run and whenever it is less than 5 minutes from expiring; if a 401 still comes back, force a refresh and retry once.
+  - Why: each collection run takes seconds, so refreshing at startup is cheap and avoids a predictable 401. The margin covers long enrichment runs; the 401 retry covers a revoked token or a skewed clock.
+- **Where to save a renewed refresh token** (a refresh may return a new token or none)
+  - Choice: in `.env` itself, only when the response contains a `refresh_token` different from the current one. The issue date is kept in `SPOTIFY_REFRESH_TOKEN_ISSUED_AT`, and the script warns when fewer than 15 of the 180 days remain.
+  - Why: the docs say the token may be missing from the response, in which case the current one remains valid; overwriting it with an empty value would break access. The token does not carry its own age, so the date has to be stored.
 
-**Modelagem e dados**
+**Modeling and data**
 
-- **Qual fonte ganha quando a mesma execução vem do export e da API**
-  - Escolha: corte temporal. O export é a fonte de verdade até o `max(ts)` dele; linhas da API só entram com `played_at` posterior a esse corte. `played_at` é gravado nas duas fontes no formato canônico `YYYY-MM-DDTHH:MM:SSZ` (UTC, precisão de segundo).
-  - Motivo: o export tem precisão de segundo e a API de milissegundo, e o `ts` do export tem ruído de ±1 s ou mais. Casar execução por execução exigiria janela de tolerância e ainda erraria nas bordas. O corte é simples, determinístico e fácil de explicar, e privilegia o export porque ele tem `ms_played`, `skipped` e `reason_*`.
-- **Execuções sem faixa de música (podcast, audiobook, vídeo, registros órfãos)**
-  - Escolha: ficam fora de `fact_plays`; o `ingest_history.py` só carrega linhas com `spotify_track_uri` e registra no log quantas descartou por tipo.
-  - Motivo: o projeto analisa música; essas linhas quebram o `NOT NULL` de `track_name`/`artist_name` e não têm dimensão correspondente. A contagem no log mantém a perda visível.
-- **Gênero mais ouvido: view SQL ou cálculo no Power BI via ponte**
-  - Escolha: _a definir_
-  - Motivo: _a definir_
-- **Política de refresh das dimensões** (nunca, a cada 90 dias, ou só artista)
-  - Escolha: _a definir_
-  - Motivo: _a definir_
-- **O que conta como "play"**
-  - Escolha: no export, `ms_played >= 30000`. Linhas da API contam como play (não têm `ms_played`). As linhas abaixo de 30 s continuam no fato; o filtro é aplicado na análise, não na carga.
-  - Motivo: 30 s é a regra oficial de contagem de streams do Spotify for Artists, então é defensável. Manter as linhas curtas preserva a análise de pulos. Limitação documentada: a API não permite aplicar o mesmo critério, e pelos relatos ela já omite boa parte dos pulos, mas não todos.
+- **Which source wins when the same play comes from both the export and the API**
+  - Choice: a time cutoff. The export is the source of truth up to its `max(ts)`; API rows are only loaded with a `played_at` after that cutoff. `played_at` is stored in the canonical format `YYYY-MM-DDTHH:MM:SSZ` (UTC, second precision) for both sources.
+  - Why: the export has second precision and the API has millisecond precision, and the export's `ts` has ±1 s or more of noise. Matching play by play would need a tolerance window and would still fail at the edges. The cutoff is simple, deterministic, and easy to explain, and it favors the export because it has `ms_played`, `skipped`, and `reason_*`.
+- **Plays that are not music tracks (podcasts, audiobooks, video, orphan records)**
+  - Choice: kept out of `fact_plays`; `ingest_history.py` only loads rows with a `spotify_track_uri` and logs how many it dropped, by type.
+  - Why: the project analyzes music; these rows break the `NOT NULL` constraint on `track_name`/`artist_name` and have no matching dimension. Logging the count keeps the loss visible.
+- **Most-played genre: SQL view or Power BI measure over the bridge table**
+  - Choice: _to be decided_
+  - Why: _to be decided_
+- **Dimension refresh policy** (never, every 90 days, or artists only)
+  - Choice: _to be decided_
+  - Why: _to be decided_
+- **What counts as a "play"**
+  - Choice: in the export, `ms_played >= 30000`. API rows count as plays (they have no `ms_played`). Rows under 30 s stay in the fact table; the filter is applied at analysis time, not at load time.
+  - Why: 30 s is Spotify for Artists' official stream-counting rule, so it is defensible. Keeping short rows preserves skip analysis. Documented limitation: the API does not allow applying the same criterion, and reportedly it already omits most skips, but not all.
 
-## Estrutura
+## Project structure
 
 ```
 spotify-pipeline/
@@ -82,17 +82,18 @@ spotify-pipeline/
 ├── .env.example
 ├── README.md
 ├── requirements.txt
+├── docs/                    # study notes on the API and the export (Portuguese)
 ├── sql/
-│   └── schema.sql        # fato, dimensões, ponte e fila de enrich
+│   └── schema.sql           # fact, dimensions, bridge, and enrichment queue
 ├── src/
-│   ├── get_refresh_token.py # handshake OAuth (1x a cada 180 dias)
-│   ├── auth.py           # refresh token -> access token
-│   ├── spotify_api.py    # GET com retry, 401 e rate limit (429)
-│   ├── ingest_recent.py  # /me/player/recently-played -> fact_plays + dim_*
-│   ├── ingest_history.py # export JSON -> fact_plays
-│   ├── enrich.py         # IDs sem metadata -> dim_*
-│   └── db.py             # conexão + init do schema
+│   ├── get_refresh_token.py # OAuth handshake (once every 180 days)
+│   ├── auth.py              # refresh token -> access token
+│   ├── spotify_api.py       # GET with retries, 401 handling, and rate limiting (429)
+│   ├── ingest_recent.py     # /me/player/recently-played -> fact_plays + dim_*
+│   ├── ingest_history.py    # export JSON -> fact_plays
+│   ├── enrich.py            # IDs without metadata -> dim_*
+│   └── db.py                # connection + schema init
 └── data/
-    ├── raw/              # export do Spotify (ignorado no Git)
-    └── spotify.db        # banco SQLite (ignorado no Git)
+    ├── raw/                 # Spotify export (git-ignored)
+    └── spotify.db           # SQLite database (git-ignored)
 ```
