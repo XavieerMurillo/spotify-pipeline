@@ -25,12 +25,14 @@ import logging
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 
 from auth import AuthError
-from db import get_connection, init_schema
+from db import REPO_ROOT, get_connection, init_schema
 from spotify_api import api_get
 
 log = logging.getLogger("ingest_recent")
+LOG_PATH = REPO_ROOT / "logs" / "ingest_recent.log"
 
 
 def normalize_played_at(raw: str) -> str:
@@ -94,9 +96,26 @@ def upsert_dimensions(conn: sqlite3.Connection, track: dict) -> None:
         )
 
 
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+def setup_logging() -> None:
+    """Loga no console (quando houver) e em logs/ingest_recent.log.
 
+    O Agendador roda o script com pythonw.exe, sem console: aí sys.stderr é
+    None e o arquivo é o único lugar onde sobra o rastro de cada execução.
+    """
+    LOG_PATH.parent.mkdir(exist_ok=True)
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    ]
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+    )
+
+
+def main() -> int:
     try:
         data = api_get("/me/player/recently-played", params={"limit": 50})
     except AuthError as exc:
@@ -164,4 +183,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    setup_logging()
+    try:
+        sys.exit(main())
+    except Exception:
+        # Sem console, uma exceção não tratada sumiria sem deixar rastro.
+        log.exception("Falha inesperada.")
+        sys.exit(1)

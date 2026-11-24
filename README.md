@@ -19,6 +19,21 @@ Pipeline pessoal que junta o histórico completo de execuções do Spotify (Exte
 
 A API só guarda as últimas 50 execuções: rodar com frequência suficiente para não passar disso entre uma coleta e outra. O script avisa quando detecta um buraco.
 
+### Agendamento (Windows)
+
+Uma tarefa do Agendador de Tarefas, `spotify-pipeline ingest_recent`, roda o script de hora em hora e no logon, com `pythonw.exe` (sem janela). Se o PC estava desligado no horário, ela roda assim que der. O log fica em `logs/ingest_recent.log`, com rotação de 1 MB.
+
+```powershell
+$repo = "C:\caminho\para\spotify-pipeline"
+$action = New-ScheduledTaskAction -Execute "$repo\.venv\Scripts\pythonw.exe" -Argument "src\ingest_recent.py" -WorkingDirectory $repo
+$hourly = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1)
+$logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "spotify-pipeline ingest_recent" -Action $action -Trigger $hourly,$logon -Settings $settings
+```
+
+Limitação: com o PC desligado, o que for ouvido em outro dispositivo só é capturado se ainda estiver entre as últimas 50 execuções quando a tarefa rodar.
+
 > **O refresh token vence 180 dias após a autorização** (o refresh não estende o prazo). Quando vencer, o `/api/token` responde `400 invalid_grant`: rodar `get_refresh_token.py` de novo.
 
 ### Limitações da API observadas (nov/2026)
